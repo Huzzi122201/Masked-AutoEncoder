@@ -15,7 +15,6 @@
 
 <br>
 
-![MAE Banner](https://i.imgur.com/placeholder.png)
 
 </div>
 
@@ -134,48 +133,7 @@ A 224×224 image is split into a 14×14 grid of non-overlapping 16×16 patches �
 num_patches = (224 // 16) ** 2  # = 196
 ```
 
-### Random Masking
 
-Random masking uses a **permutation trick** — generate noise per patch, argsort to shuffle, keep first 25%, save the inverse permutation `ids_restore` for decoder reconstruction.
-
-```python
-def random_masking(x, mask_ratio=0.75):
-    B, N, D = x.shape
-    len_keep    = int(N * (1 - mask_ratio))          # 49 patches
-    noise       = torch.rand(B, N, device=x.device)
-    ids_shuffle = torch.argsort(noise, dim=1)
-    ids_restore = torch.argsort(ids_shuffle, dim=1)  # inverse permutation
-    ids_keep    = ids_shuffle[:, :len_keep]
-    x_masked    = torch.gather(x, dim=1,
-                      index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-    mask = torch.ones([B, N], device=x.device)
-    mask[:, :len_keep] = 0
-    mask = torch.gather(mask, dim=1, index=ids_restore)
-    return x_masked, mask, ids_restore
-```
-
-### Positional Embeddings
-
-Fixed **sinusoidal positional embeddings** registered as buffers (non-learnable), following the original MAE paper:
-
-```
-PE(pos, 2i)   = sin(pos / 10000^(2i/d))
-PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
-```
-
-### Loss Function
-
-MSE computed **only on masked patches** — visible patches are excluded entirely:
-
-```python
-def mae_loss(pred, target, mask):
-    loss = (pred - target) ** 2
-    loss = loss.mean(dim=-1)                     # avg over pixels
-    loss = (loss * mask).sum() / mask.sum()      # only masked patches
-    return loss
-```
-
----
 
 ## ⚙️ Training Configuration
 
@@ -194,25 +152,7 @@ def mae_loss(pred, target, mask):
 | Precision | Mixed (FP16/FP32) |
 | Hardware | Kaggle T4 × 2 |
 
-### Weight Decay Groups
 
-Bias terms, LayerNorm, and the mask token receive **zero weight decay** to prevent training instability:
-
-```python
-def build_param_groups(model, weight_decay=0.05):
-    decay, no_decay = [], []
-    for name, param in model.named_parameters():
-        if param.ndim == 1 or 'bias' in name or 'norm' in name.lower() or 'mask_token' in name:
-            no_decay.append(param)
-        else:
-            decay.append(param)
-    return [
-        {"params": decay,    "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
-```
-
----
 
 ## 📊 Evaluation
 
@@ -298,13 +238,6 @@ Available on Kaggle: [`akash2sharma/tiny-imagenet`](https://www.kaggle.com/datas
 
 **FAST NUCES — Generative AI (AI4009) · Spring 2026**
 
-| | |
-|---|---|
-| Group Assignment | Max 2 Members |
-| Course | AI4009 — Generative AI |
-| University | National University of Computer and Emerging Sciences |
-
----
 
 <div align="center">
 
