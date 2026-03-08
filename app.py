@@ -212,6 +212,7 @@ class MAE(nn.Module):
                  enc_layers=12, dec_layers=12,
                  enc_heads=12, dec_heads=6, mask_ratio=0.75):
         super().__init__()
+        self.patch_embed = PatchEmbedding(img_size, patch_size, embed_dim=enc_dim)
         self.n_patches  = (img_size // patch_size) ** 2
         self.mask_ratio = mask_ratio
         self.encoder    = MAEEncoder(img_size, patch_size, enc_dim, enc_layers, enc_heads)
