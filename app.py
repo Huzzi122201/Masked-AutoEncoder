@@ -106,120 +106,153 @@ hr { border-color: #1e1e24 !important; }
 
 
 # ─────────────────────────────────────────────
-#  MODEL DEFINITION  (copied from notebook)
+#  MODEL DEFINITION (matching mae_best.pth checkpoint)
 # ─────────────────────────────────────────────
 
-class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, num_patches: int, embed_dim: int):
-        super().__init__()
-        pe       = torch.zeros(num_patches, embed_dim)
-        position = torch.arange(0, num_patches, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, embed_dim, 2).float() * (-math.log(10000.0) / embed_dim)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe.unsqueeze(0))
-
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1), :]
-
-
-class PatchEmbedding(nn.Module):
-    def __init__(self, image_size=224, patch_size=16, in_channels=3, embed_dim=768):
-        super().__init__()
-        self.patch_size  = patch_size
-        self.num_patches = (image_size // patch_size) ** 2
-        self.proj        = nn.Linear(patch_size * patch_size * in_channels, embed_dim)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        p  = self.patch_size
-        h, w = H // p, W // p
-        x  = x.view(B, C, h, p, w, p)
-        x  = x.permute(0, 2, 4, 3, 5, 1)
-        x  = x.reshape(B, h * w, p * p * C)
-        return self.proj(x)
+def patchify_img(imgs, patch_size=16):
+    B, C, H, W = imgs.shape
+    p = patch_size
+    h = w = H // p
+    x = imgs.reshape(B, C, h, p, w, p)
+    x = x.permute(0, 2, 4, 3, 5, 1)
+    x = x.reshape(B, h * w, p * p * C)
+    return x
 
 
 def random_masking(x, mask_ratio=0.75):
-    B, N, D    = x.shape
-    len_keep   = int(N * (1 - mask_ratio))
-    noise      = torch.rand(B, N, device=x.device)
+    B, N, D = x.shape
+    len_keep = int(N * (1 - mask_ratio))
+    noise = torch.rand(B, N, device=x.device)
     ids_shuffle = torch.argsort(noise, dim=1)
     ids_restore = torch.argsort(ids_shuffle, dim=1)
-    ids_keep    = ids_shuffle[:, :len_keep].to(x.device)
-    ids_restore = ids_restore.to(x.device)
-    x_masked    = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
-    mask        = torch.ones([B, N], device=x.device)
+    ids_keep = ids_shuffle[:, :len_keep]
+    x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
+    mask = torch.ones([B, N], device=x.device)
     mask[:, :len_keep] = 0
-    mask        = torch.gather(mask, dim=1, index=ids_restore)
+    mask = torch.gather(mask, dim=1, index=ids_restore)
     return x_masked, mask, ids_restore
 
 
 class MAEEncoder(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, embed_dim=768,
-                 num_layers=12, num_heads=12):
+    def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_layers=12, num_heads=12):
         super().__init__()
-        self.patch_embed = PatchEmbedding(img_size, patch_size, embed_dim=embed_dim)
-        n_patches        = (img_size // patch_size) ** 2
-        self.pos_enc     = SinusoidalPositionalEncoding(n_patches, embed_dim)
-        enc_layer        = nn.TransformerEncoderLayer(
+        self.patch_size = patch_size
+        n_patches = (img_size // patch_size) ** 2
+        
+        # Linear patch embedding
+        self.patch_embed = nn.Linear(patch_size * patch_size * 3, embed_dim)
+        
+        # Learnable CLS token and positional embeddings
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, embed_dim))
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim, nhead=num_heads,
             dim_feedforward=embed_dim * 4, batch_first=True
         )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(embed_dim)
+        
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x, mask_ratio=0.75):
+        B = x.shape[0]
+        
+        # Patchify and embed
+        x = patchify_img(x, self.patch_size)
         x = self.patch_embed(x)
-        x = self.pos_enc(x)
+        
+        # Add positional embeddings (without CLS for now)
+        x = x + self.pos_embed[:, 1:, :]
+        
+        # Masking
         x_masked, mask, ids_restore = random_masking(x, mask_ratio)
-        x_enc = self.encoder(x_masked)
-        return x_enc, mask, ids_restore, x_masked
+        
+        # Append CLS token
+        cls_token = self.cls_token + self.pos_embed[:, :1, :]
+        cls_tokens = cls_token.expand(B, -1, -1)
+        x_masked = torch.cat([cls_tokens, x_masked], dim=1)
+        
+        # Transformer
+        x_masked = self.transformer(x_masked)
+        x_masked = self.norm(x_masked)
+        
+        return x_masked, mask, ids_restore
 
 
 class MAEDecoder(nn.Module):
-    def __init__(self, n_patches, patch_size=16, enc_dim=768,
-                 dec_dim=384, num_layers=12, num_heads=6):
+    def __init__(self, n_patches, patch_size=16, enc_dim=768, dec_dim=384, num_layers=12, num_heads=6):
         super().__init__()
-        self.n_patches     = n_patches
-        self.patch_size    = patch_size
-        self.mask_token    = nn.Parameter(torch.zeros(1, 1, dec_dim))
-        self.decoder_embed = nn.Linear(enc_dim, dec_dim)
-        self.pos_enc       = SinusoidalPositionalEncoding(n_patches, dec_dim)
-        dec_layer          = nn.TransformerEncoderLayer(
+        self.n_patches = n_patches
+        self.patch_size = patch_size
+        
+        # Projection from encoder dim to decoder dim
+        self.proj = nn.Linear(enc_dim, dec_dim)
+        
+        # Learnable mask token and positional embeddings
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, dec_dim))
+        
+        # Transformer decoder
+        decoder_layer = nn.TransformerEncoderLayer(
             d_model=dec_dim, nhead=num_heads,
             dim_feedforward=dec_dim * 4, batch_first=True
         )
-        self.decoder      = nn.TransformerEncoder(dec_layer, num_layers=num_layers)
-        self.decoder_pred = nn.Linear(dec_dim, patch_size * patch_size * 3)
+        self.transformer = nn.TransformerEncoder(decoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(dec_dim)
+        
+        # Pixel prediction head
+        self.pixel_head = nn.Linear(dec_dim, patch_size * patch_size * 3)
+        
         nn.init.trunc_normal_(self.mask_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x_enc, ids_restore):
-        B  = x_enc.size(0)
-        x  = self.decoder_embed(x_enc)
-        mt = self.mask_token.expand(B, self.n_patches - x.size(1), -1)
-        x_ = torch.cat([x, mt], dim=1)
-        x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).expand_as(x_))
-        x_ = self.pos_enc(x_)
-        x_ = self.decoder(x_)
-        return self.decoder_pred(x_)
+        B = x_enc.shape[0]
+        
+        # Remove CLS token and project
+        x = x_enc[:, 1:, :]
+        x = self.proj(x)
+        
+        # Append mask tokens
+        mask_tokens = self.mask_token.repeat(B, self.n_patches - x.shape[1], 1)
+        x = torch.cat([x, mask_tokens], dim=1)
+        
+        # Unshuffle
+        x = torch.gather(x, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
+        
+        # Add CLS token back
+        cls_token = self.proj(x_enc[:, :1, :])
+        x = torch.cat([cls_token, x], dim=1)
+        
+        # Add positional embeddings
+        x = x + self.pos_embed
+        
+        # Transformer
+        x = self.transformer(x)
+        x = self.norm(x)
+        
+        # Remove CLS and predict pixels
+        x = x[:, 1:, :]
+        x = self.pixel_head(x)
+        
+        return x
 
 
 class MAE(nn.Module):
-    def __init__(self, img_size=224, patch_size=16,
-                 enc_dim=768, dec_dim=384,
-                 enc_layers=12, dec_layers=12,
-                 enc_heads=12, dec_heads=6, mask_ratio=0.75):
+    def __init__(self, img_size=224, patch_size=16, enc_dim=768, dec_dim=384,
+                 enc_layers=12, dec_layers=12, enc_heads=12, dec_heads=6, mask_ratio=0.75):
         super().__init__()
-        self.patch_embed = PatchEmbedding(img_size, patch_size, embed_dim=enc_dim)
-        self.n_patches  = (img_size // patch_size) ** 2
         self.mask_ratio = mask_ratio
-        self.encoder    = MAEEncoder(img_size, patch_size, enc_dim, enc_layers, enc_heads)
-        self.decoder    = MAEDecoder(self.n_patches, patch_size, enc_dim, dec_dim, dec_layers, dec_heads)
+        n_patches = (img_size // patch_size) ** 2
+        
+        self.encoder = MAEEncoder(img_size, patch_size, enc_dim, enc_layers, enc_heads)
+        self.decoder = MAEDecoder(n_patches, patch_size, enc_dim, dec_dim, dec_layers, dec_heads)
 
     def forward(self, x):
-        x_enc, mask, ids_restore, _ = self.encoder(x, mask_ratio=self.mask_ratio)
+        x_enc, mask, ids_restore = self.encoder(x, mask_ratio=self.mask_ratio)
         x_rec = self.decoder(x_enc, ids_restore)
         return x_rec, mask
 
