@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -315,14 +316,6 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("##### 🤖 Model Weights")
-    weights_file = st.file_uploader(
-        "Upload .pth checkpoint",
-        type=["pth"],
-        help="Upload your trained best_mae_model.pth"
-    )
-
-    st.markdown("---")
     st.markdown("""
     <div style='font-family:"Space Mono",monospace; font-size:10px;
                 color:#2a2a35; line-height:1.8;'>
@@ -381,23 +374,18 @@ if uploaded is not None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # ── load model ──
+    # ── load model from checkpoint placed next to app.py ──
+    CHECKPOINT = "best_mae_model.pth"
     model = None
-    if weights_file is not None:
+    if os.path.exists(CHECKPOINT):
         try:
-            buf = io.BytesIO(weights_file.read())
-            tmp_path = "/tmp/mae_weights.pth"
-            with open(tmp_path, "wb") as f:
-                f.write(buf.getvalue())
-            model = load_model(tmp_path, device)
+            model = load_model(CHECKPOINT, device)
         except Exception as e:
-            st.error(f"Could not load weights: {e}")
+            st.error(f"Could not load checkpoint `{CHECKPOINT}`: {e}")
     else:
-        # Demo mode — random weights (shows the pipeline without a trained model)
         model = MAE(mask_ratio=mask_ratio).to(device)
         model.eval()
-        st.warning("⚠️  No weights uploaded — running with **random weights** (demo mode). "
-                   "Upload your trained `.pth` file in the sidebar for real reconstructions.")
+        st.warning(f"⚠️  `{CHECKPOINT}` not found next to `app.py` — running with **random weights** (demo mode).")
 
     if model is not None:
         # ── preprocess ──
