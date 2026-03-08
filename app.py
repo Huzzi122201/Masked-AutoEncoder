@@ -376,7 +376,7 @@ if uploaded is not None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # ── load model from checkpoint placed next to app.py ──
-    CHECKPOINT = "best_mae_model.pth"
+    CHECKPOINT = "mae_best.pth"
     model = None
     if os.path.exists(CHECKPOINT):
         try:
