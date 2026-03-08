@@ -431,7 +431,6 @@ if uploaded is not None:
         # ── run model with chosen mask ratio ──
         # Temporarily patch mask_ratio
         model.mask_ratio = mask_ratio
-        model.encoder.pos_enc  # warmup
 
         with st.spinner("Running MAE inference…"):
             with torch.no_grad():
