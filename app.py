@@ -5,10 +5,14 @@ import torch.nn as nn
 import numpy as np
 import math
 import io
+import warnings
 from PIL import Image
 from torchvision import transforms
 from skimage.metrics import peak_signal_noise_ratio as psnr_metric
 from skimage.metrics import structural_similarity as ssim_metric
+
+# Suppress expected PyTorch warnings
+warnings.filterwarnings('ignore', message='.*enable_nested_tensor.*')
 
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
@@ -555,7 +559,7 @@ if uploaded is not None:
                 ① Original Input
             </div>""", unsafe_allow_html=True)
             st.image(tensor_to_pil(torch.tensor(orig_np).permute(2, 0, 1)),
-                     use_column_width=True)
+                     use_container_width=True)
 
         with c2:
             st.markdown(f"""
@@ -565,7 +569,7 @@ if uploaded is not None:
                 ② Masked ({mask_ratio*100:.0f}% hidden)
             </div>""", unsafe_allow_html=True)
             st.image(tensor_to_pil(torch.tensor(masked_np).permute(2, 0, 1)),
-                     use_column_width=True)
+                     use_container_width=True)
 
         with c3:
             st.markdown("""
@@ -575,7 +579,7 @@ if uploaded is not None:
                 ③ Reconstruction
             </div>""", unsafe_allow_html=True)
             st.image(tensor_to_pil(torch.tensor(recon_np).permute(2, 0, 1)),
-                     use_column_width=True)
+                     use_container_width=True)
 
         # Patch visualisation bar
         st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
