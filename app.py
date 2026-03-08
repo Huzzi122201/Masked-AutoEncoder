@@ -191,9 +191,9 @@ class MAEDecoder(nn.Module):
         # Projection from encoder dim to decoder dim
         self.proj = nn.Linear(enc_dim, dec_dim)
         
-        # Learnable mask token and positional embeddings
+        # Learnable mask token and positional embeddings (no CLS token in decoder)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches + 1, dec_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches, dec_dim))
         
         # Transformer decoder
         decoder_layer = nn.TransformerEncoderLayer(
@@ -223,19 +223,14 @@ class MAEDecoder(nn.Module):
         # Unshuffle
         x = torch.gather(x, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, x.shape[2]))
         
-        # Add CLS token back
-        cls_token = self.proj(x_enc[:, :1, :])
-        x = torch.cat([cls_token, x], dim=1)
-        
-        # Add positional embeddings
+        # Add positional embeddings (no CLS token in decoder)
         x = x + self.pos_embed
         
         # Transformer
         x = self.transformer(x)
         x = self.norm(x)
         
-        # Remove CLS and predict pixels
-        x = x[:, 1:, :]
+        # Predict pixels
         x = self.pixel_head(x)
         
         return x
