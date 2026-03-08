@@ -364,9 +364,9 @@ def tensor_to_pil(tensor):
 
 
 @st.cache_resource
-def load_model(weights_path: str, device: str):
-    model = MAE()
-    state = torch.load(weights_path, map_location=device)
+def load_model(weights_path: str, device: str, mask_ratio: float):
+    model = MAE(mask_ratio=mask_ratio)
+    state = torch.load(weights_path, map_location=device, weights_only=False)
     model.load_state_dict(state)
     model.eval()
     return model.to(device)
@@ -480,9 +480,10 @@ if uploaded is not None:
     model = None
     if os.path.exists(CHECKPOINT):
         try:
-            model = load_model(CHECKPOINT, device)
+            model = load_model(CHECKPOINT, device, mask_ratio)
         except Exception as e:
             st.error(f"Could not load checkpoint `{CHECKPOINT}`: {e}")
+            st.stop()
     else:
         model = MAE(mask_ratio=mask_ratio).to(device)
         model.eval()
@@ -501,12 +502,18 @@ if uploaded is not None:
         img_tensor = transform(pil_img).unsqueeze(0).to(device)
 
         # ── run model with chosen mask ratio ──
-        # Temporarily patch mask_ratio
+        # Update model's mask ratio
         model.mask_ratio = mask_ratio
 
         with st.spinner("Running MAE inference…"):
             with torch.no_grad():
-                recon_patches, mask, _ = model(img_tensor)
+                try:
+                    recon_patches, mask, patches = model(img_tensor)
+                except Exception as e:
+                    st.error(f"Error during inference: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
+                    st.stop()
 
         recon_imgs  = unpatchify(recon_patches, 16, 224)
         masked_imgs = build_masked_image(img_tensor.cpu(), mask.cpu(), 16)
