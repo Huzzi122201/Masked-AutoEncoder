@@ -506,7 +506,7 @@ if uploaded is not None:
 
         with st.spinner("Running MAE inference…"):
             with torch.no_grad():
-                recon_patches, mask = model(img_tensor)
+                recon_patches, mask, _ = model(img_tensor)
 
         recon_imgs  = unpatchify(recon_patches, 16, 224)
         masked_imgs = build_masked_image(img_tensor.cpu(), mask.cpu(), 16)
