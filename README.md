@@ -236,7 +236,6 @@ Available on Kaggle: [`akash2sharma/tiny-imagenet`](https://www.kaggle.com/datas
 
 ## 👥 Authors
 
-**FAST NUCES — Generative AI (AI4009) · Spring 2026**
 
 
 <div align="center">
