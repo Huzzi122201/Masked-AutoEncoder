@@ -106,34 +106,41 @@ hr { border-color: #1e1e24 !important; }
 
 
 # ─────────────────────────────────────────────
-#  MODEL DEFINITION (matching mae_best.pth checkpoint)
+#  MODEL DEFINITION (matching notebook exactly)
 # ─────────────────────────────────────────────
 
-def patchify_img(imgs, patch_size=16):
-    B, C, H, W = imgs.shape
-    p = patch_size
-    h = w = H // p
-    x = imgs.reshape(B, C, h, p, w, p)
+def images_to_patches(images, patch_size):
+    """Split images into patches."""
+    B, C, H, W = images.shape
+    h = H // patch_size
+    w = W // patch_size
+    x = images.reshape(B, C, h, patch_size, w, patch_size)
     x = x.permute(0, 2, 4, 3, 5, 1)
-    x = x.reshape(B, h * w, p * p * C)
+    x = x.reshape(B, h * w, patch_size * patch_size * C)
     return x
 
 
 def random_masking(patches, mask_ratio):
+    """Randomly mask patches and return shuffle information."""
     B, N, D = patches.shape
     num_keep = int(N * (1 - mask_ratio))
+    
     noise = torch.rand(B, N, device=patches.device)
     shuffle_ids = noise.argsort(dim=1)
+    
     keep_ids = shuffle_ids[:, :num_keep]
     visible_patches = patches.gather(dim=1, index=keep_ids.unsqueeze(-1).repeat(1, 1, D))
+    
     restore_ids = shuffle_ids.argsort(dim=1)
     mask = torch.ones(B, N, device=patches.device)
     mask[:, :num_keep] = 0
     mask = mask.gather(dim=1, index=restore_ids).bool()
+    
     return visible_patches, mask, shuffle_ids
 
 
 class MAEEncoder(nn.Module):
+    """ViT-Base encoder - only sees visible patches."""
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_layers=12, num_heads=12):
         super().__init__()
         self.dim = embed_dim
@@ -144,12 +151,15 @@ class MAEEncoder(nn.Module):
         self.patch_embed = nn.Linear(patch_pixels, embed_dim)
         
         # Fixed sinusoidal positional embeddings
-        self.register_buffer('pos_embed', self._get_sinusoidal_embed(self.num_patches + 1, embed_dim))
+        self.register_buffer(
+            'pos_embed',
+            self._get_sinusoidal_embed(self.num_patches + 1, embed_dim)
+        )
         
         # Learnable CLS token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         
-        # Transformer encoder with norm_first=True
+        # Transformer with norm_first=True
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim, nhead=num_heads,
             dim_feedforward=embed_dim * 4,
@@ -162,6 +172,7 @@ class MAEEncoder(nn.Module):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
     
     def _get_sinusoidal_embed(self, num_patches, dim):
+        """Fixed sine-cosine positional embeddings."""
         pos_embed = torch.zeros(num_patches, dim)
         position = torch.arange(0, num_patches).unsqueeze(1).float()
         div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
@@ -169,32 +180,22 @@ class MAEEncoder(nn.Module):
         pos_embed[:, 1::2] = torch.cos(position * div_term)
         return pos_embed.unsqueeze(0)
     
-    def forward(self, images, mask_ratio=0.75):
-        B = images.size(0)
+    def forward(self, visible_patches, keep_ids):
+        """
+        visible_patches: (B, num_visible, patch_pixels)
+        keep_ids: (B, num_visible) - original patch positions
+        """
+        B = visible_patches.size(0)
         
-        # Patchify and embed
-        patches = patchify_img(images, 16)
-        x = self.patch_embed(patches)
+        # Embed patches
+        x = self.patch_embed(visible_patches)
         
-        # Add positional embeddings (without CLS)
+        # Add positional embedding for each visible patch's original position
         pos = self.pos_embed[:, 1:, :]
-        x = x + pos
-        
-        # Random masking
-        visible_patches, mask, shuffle_ids = random_masking(x, mask_ratio)
-        num_visible = visible_patches.size(1)
-        keep_ids = shuffle_ids[:, :num_visible]
-        
-        # Add positional embeddings for visible patches based on their original positions
-        pos = self.pos_embed[:, 1:, :]
-        x = visible_patches + pos.expand(B, -1, -1).gather(
-            dim=1, index=keep_ids.unsqueeze(-1).repeat(1, 1, self.dim)
-        ) - pos.expand(B, -1, -1).gather(
-            dim=1, index=keep_ids.unsqueeze(-1).repeat(1, 1, self.dim)
+        x = x + pos.expand(B, -1, -1).gather(
+            dim=1,
+            index=keep_ids.unsqueeze(-1).repeat(1, 1, self.dim)
         )
-        
-        # Simpler: just use visible_patches as they already have pos embed
-        x = visible_patches
         
         # Prepend CLS token with its positional embedding
         cls = self.cls_token.expand(B, -1, -1) + self.pos_embed[:, :1, :]
@@ -204,11 +205,12 @@ class MAEEncoder(nn.Module):
         x = self.transformer(x)
         x = self.norm(x)
         
-        # Remove CLS token — return patch tokens only
-        return x[:, 1:, :], mask, shuffle_ids, num_visible
+        # Remove CLS token - return patch tokens only
+        return x[:, 1:, :]
 
 
 class MAEDecoder(nn.Module):
+    """ViT-Small decoder - reconstructs all patches."""
     def __init__(self, n_patches, patch_size=16, enc_dim=768, dec_dim=384, num_layers=12, num_heads=6):
         super().__init__()
         self.dec_dim = dec_dim
@@ -221,10 +223,13 @@ class MAEDecoder(nn.Module):
         # Learnable mask token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dec_dim))
         
-        # Fixed sinusoidal positional embeddings
-        self.register_buffer('pos_embed', self._get_sinusoidal_embed(n_patches, dec_dim))
+        # Fixed sinusoidal positional embeddings (no CLS in decoder)
+        self.register_buffer(
+            'pos_embed',
+            self._get_sinusoidal_embed(n_patches, dec_dim)
+        )
         
-        # Transformer decoder with norm_first=True
+        # Transformer with norm_first=True
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=dec_dim, nhead=num_heads,
             dim_feedforward=dec_dim * 4,
@@ -240,6 +245,7 @@ class MAEDecoder(nn.Module):
         nn.init.trunc_normal_(self.mask_token, std=0.02)
     
     def _get_sinusoidal_embed(self, num_patches, dim):
+        """Fixed sine-cosine positional embeddings."""
         pos_embed = torch.zeros(num_patches, dim)
         position = torch.arange(0, num_patches).unsqueeze(1).float()
         div_term = torch.exp(torch.arange(0, dim, 2).float() * (-math.log(10000.0) / dim))
@@ -248,6 +254,11 @@ class MAEDecoder(nn.Module):
         return pos_embed.unsqueeze(0)
     
     def forward(self, enc_tokens, shuffle_ids, num_visible):
+        """
+        enc_tokens: (B, num_visible, enc_dim)
+        shuffle_ids: (B, num_patches) - original shuffle permutation
+        num_visible: int - number of visible patches
+        """
         B = enc_tokens.size(0)
         num_mask = self.num_patches - num_visible
         
@@ -262,7 +273,10 @@ class MAEDecoder(nn.Module):
         
         # Unshuffle to original spatial patch order
         restore_ids = shuffle_ids.argsort(dim=1)
-        full_seq = full_seq.gather(dim=1, index=restore_ids.unsqueeze(-1).repeat(1, 1, self.dec_dim))
+        full_seq = full_seq.gather(
+            dim=1,
+            index=restore_ids.unsqueeze(-1).repeat(1, 1, self.dec_dim)
+        )
         
         # Add positional embeddings
         full_seq = full_seq + self.pos_embed
@@ -275,20 +289,39 @@ class MAEDecoder(nn.Module):
 
 
 class MAE(nn.Module):
+    """Full MAE model."""
     def __init__(self, img_size=224, patch_size=16, enc_dim=768, dec_dim=384,
                  enc_layers=12, dec_layers=12, enc_heads=12, dec_heads=6, mask_ratio=0.75):
         super().__init__()
         self.mask_ratio = mask_ratio
         self.patch_size = patch_size
-        n_patches = (img_size // patch_size) ** 2
+        self.num_patches = (img_size // patch_size) ** 2
         
         self.encoder = MAEEncoder(img_size, patch_size, enc_dim, enc_layers, enc_heads)
-        self.decoder = MAEDecoder(n_patches, patch_size, enc_dim, dec_dim, dec_layers, dec_heads)
-
+        self.decoder = MAEDecoder(self.num_patches, patch_size, enc_dim, dec_dim, dec_layers, dec_heads)
+    
     def forward(self, images):
-        enc_out, mask, shuffle_ids, num_visible = self.encoder(images, self.mask_ratio)
+        """
+        images: (B, 3, 224, 224)
+        Returns: (reconstruction, mask, patches)
+        """
+        # Step 1: Split image into patches
+        patches = images_to_patches(images, self.patch_size)
+        
+        # Step 2: Randomly mask patches
+        visible_patches, mask, shuffle_ids = random_masking(patches, self.mask_ratio)
+        num_visible = visible_patches.size(1)
+        
+        # Step 3: keep_ids are first num_visible of shuffle_ids
+        keep_ids = shuffle_ids[:, :num_visible]
+        
+        # Step 4: Encode visible patches only
+        enc_out = self.encoder(visible_patches, keep_ids)
+        
+        # Step 5: Decode using shuffle_ids
         reconstruction = self.decoder(enc_out, shuffle_ids, num_visible)
-        return reconstruction, mask
+        
+        return reconstruction, mask, patches
 
 
 # ─────────────────────────────────────────────
