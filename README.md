@@ -234,8 +234,6 @@ Available on Kaggle: [`akash2sharma/tiny-imagenet`](https://www.kaggle.com/datas
 
 ---
 
-## 👥 Authors
-
 
 
 <div align="center">
